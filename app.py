@@ -12,6 +12,7 @@ AZURE_ENDPOINT = "https://kb-stellar.openai.azure.com/"
 AZURE_API_VERSION = "2024-08-01-preview"
 AZURE_API_KEY = "bc0ba854d3644d7998a5034af62d03ce"
 
+
 def create_client():
     return AzureOpenAI(
         azure_endpoint=AZURE_ENDPOINT,
@@ -57,7 +58,7 @@ async def data_analysis(
                 "For numerical data, always show statistical analysis. For images, provide insights. "
                 "When appropriate, create visualizations to support your findings."
             ),
-            model="gpt-4o-2024-05-13",
+            model="gpt-4o-mini",
             tools=[{"type": "code_interpreter"}],
             tool_resources={"code_interpreter": {"file_ids": file_ids}}
         )
