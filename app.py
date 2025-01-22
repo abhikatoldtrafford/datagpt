@@ -5,7 +5,7 @@ import base64
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from openai import AzureOpenAI
-from typing import Optional
+from typing import Optional, List
 
 app = FastAPI()
 
@@ -78,27 +78,30 @@ async def upload_file(file: UploadFile = File(...)):
     client = create_client()
     
     try:
-        # Upload file directly to code interpreter
+        # Upload file with assistants purpose
         file_content = await file.read()
         uploaded_file = client.files.create(
             file=file_content,
             purpose="assistants"
         )
         
-        # Update assistant with new file
+        # Update assistant with new file ID
         assistant = client.beta.assistants.retrieve(global_context["assistant_id"])
-        updated_assistant = client.beta.assistants.update(
-            assistant.id,
+        current_files = assistant.tool_resources.code_interpreter.file_ids
+        new_files = current_files + [uploaded_file.id]
+        
+        client.beta.assistants.update(
+            global_context["assistant_id"],
             tool_resources={
                 "code_interpreter": {
-                    "file_ids": assistant.tool_resources.code_interpreter.file_ids + [uploaded_file.id]
+                    "file_ids": new_files
                 }
             }
         )
         
         # Update global context
-        global_context["file_ids"].append(uploaded_file.id)
-        
+        global_context["file_ids"] = new_files
+
         return JSONResponse({"message": "File uploaded successfully"})
 
     except Exception as e:
@@ -107,43 +110,37 @@ async def upload_file(file: UploadFile = File(...)):
 
 @app.post("/chat")
 async def chat(prompt: str = Form(...)):
-    """Handle chat interactions with improved error handling"""
+    """Handle chat interactions with image support"""
     await ensure_initialized()
     client = create_client()
     
     try:
-        # Add message with attached files
-        message = client.beta.threads.messages.create(
+        # Add message to thread
+        client.beta.threads.messages.create(
             thread_id=global_context["thread_id"],
             role="user",
             content=prompt,
             file_ids=global_context["file_ids"]
         )
 
-        # Create and monitor run
+        # Create and poll run
         run = client.beta.threads.runs.create(
             thread_id=global_context["thread_id"],
             assistant_id=global_context["assistant_id"]
         )
 
-        # Enhanced status monitoring
+        # Wait for completion
         start = time.time()
-        while time.time() - start < 300:  # Increased timeout to 5 minutes
+        while time.time() - start < 120:
             run = client.beta.threads.runs.retrieve(
                 thread_id=global_context["thread_id"],
                 run_id=run.id
             )
-            
             if run.status == "completed":
                 break
-            elif run.status in ["failed", "cancelled", "expired"]:
-                error_info = run.last_error if run.last_error else "No error details"
-                logging.error(f"Run failed: {error_info}")
-                raise HTTPException(500, detail=f"Analysis failed: {error_info.code} - {error_info.message}")
-            
-            time.sleep(5)  # Check less frequently
+            time.sleep(2)
 
-        # Process response
+        # Retrieve and format response
         messages = client.beta.threads.messages.list(
             thread_id=global_context["thread_id"],
             order="asc"
@@ -159,24 +156,21 @@ async def chat(prompt: str = Form(...)):
                             "content": content.text.value
                         })
                     elif content.type == "image_file":
-                        try:
-                            image_data = client.files.content(content.image_file.file_id)
-                            response_content.append({
-                                "type": "image",
-                                "format": "png",
-                                "content": base64.b64encode(image_data.read()).decode()
-                            })
-                        except Exception as img_error:
-                            logging.error(f"Image processing error: {str(img_error)}")
-                            continue
-
+                        # Download and encode image
+                        image_data = client.files.content(content.image_file.file_id)
+                        image_bytes = image_data.read()
+                        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+                        response_content.append({
+                            "type": "image",
+                            "format": "png",
+                            "content": base64_image
+                        })
+        
         return JSONResponse({"response": response_content})
 
-    except HTTPException as he:
-        raise he
     except Exception as e:
-        logging.error(f"Chat error: {str(e)}", exc_info=True)
-        raise HTTPException(500, detail=f"Chat processing failed: {str(e)}")
+        logging.error(f"Chat error: {str(e)}")
+        raise HTTPException(500, "Chat processing failed")
 
 if __name__ == "__main__":
     import uvicorn
