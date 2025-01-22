@@ -23,7 +23,7 @@ def create_client():
 @app.post("/data-analysis")
 async def data_analysis(
     files: List[UploadFile] = File(...),
-    user_input: str = Form(...),
+    user_input: str = Form("Analyze the provided data and generate insights"),
     product_id: Optional[str] = None
 ):
     """
