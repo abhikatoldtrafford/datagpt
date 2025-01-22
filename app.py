@@ -13,7 +13,7 @@ app = FastAPI()
 global_context = {
     "assistant_id": None,
     "thread_id": None,
-    "vector_store_id": None
+    "file_ids": []
 }
 
 # Azure OpenAI configuration
@@ -30,7 +30,7 @@ def create_client():
 
 async def ensure_initialized():
     """Ensure global context is initialized"""
-    if not all(global_context.values()):
+    if not global_context["assistant_id"] or not global_context["thread_id"]:
         await initiate_chat()
 
 @app.post("/initiate-chat")
@@ -39,28 +39,26 @@ async def initiate_chat(file: UploadFile = File(None)):
     client = create_client()
     
     try:
-        # Create new resources
-        vector_store = client.beta.vector_stores.create(name="main_store")
+        # Create new assistant with code interpreter only
         assistant = client.beta.assistants.create(
             name="Data Analyst",
-            instructions="Analyze data using code interpreter and file search",
+            instructions="Analyze data using code interpreter",
             model="gpt-4o-mini",
-            tools=[{"type": "code_interpreter"}, {"type": "file_search"}],
-            tool_resources={
-                "file_search": {"vector_store_ids": [vector_store.id]},
-                "code_interpreter": {"file_ids": []}
-            }
+            tools=[{"type": "code_interpreter"}],
+            tool_resources={"code_interpreter": {"file_ids": []}}
         )
+        
+        # Create new thread
         thread = client.beta.threads.create()
 
         # Update global context
         global_context.update({
             "assistant_id": assistant.id,
             "thread_id": thread.id,
-            "vector_store_id": vector_store.id
+            "file_ids": []
         })
 
-        # Handle initial file upload
+        # Handle initial file upload if provided
         if file:
             await upload_file(file)
 
@@ -75,23 +73,32 @@ async def initiate_chat(file: UploadFile = File(None)):
 
 @app.post("/upload-file")
 async def upload_file(file: UploadFile = File(...)):
-    """Handle file uploads for current session"""
+    """Handle file uploads for code interpreter"""
     await ensure_initialized()
     client = create_client()
     
     try:
-        # Save file temporarily
-        file_path = f"/tmp/{file.filename}"
-        with open(file_path, "wb") as f:
-            f.write(await file.read())
-
-        # Upload to vector store
-        with open(file_path, "rb") as f:
-            client.beta.vector_stores.file_batches.upload_and_poll(
-                vector_store_id=global_context["vector_store_id"],
-                files=[f]
-            )
-
+        # Upload file directly to code interpreter
+        file_content = await file.read()
+        uploaded_file = client.files.create(
+            file=file_content,
+            purpose="assistants"
+        )
+        
+        # Update assistant with new file
+        assistant = client.beta.assistants.retrieve(global_context["assistant_id"])
+        updated_assistant = client.beta.assistants.update(
+            assistant.id,
+            tool_resources={
+                "code_interpreter": {
+                    "file_ids": assistant.tool_resources.code_interpreter.file_ids + [uploaded_file.id]
+                }
+            }
+        )
+        
+        # Update global context
+        global_context["file_ids"].append(uploaded_file.id)
+        
         return JSONResponse({"message": "File uploaded successfully"})
 
     except Exception as e:
@@ -109,7 +116,8 @@ async def chat(prompt: str = Form(...)):
         client.beta.threads.messages.create(
             thread_id=global_context["thread_id"],
             role="user",
-            content=prompt
+            content=prompt,
+            file_ids=global_context["file_ids"]
         )
 
         # Create and poll run
@@ -145,22 +153,18 @@ async def chat(prompt: str = Form(...)):
                             "content": content.text.value
                         })
                     elif content.type == "image_file":
-                        try:
-                            # Get image bytes
-                            image_data = client.files.content(content.image_file.file_id)
-                            image_bytes = image_data.read()
-                            
-                            # Convert to base64
-                            base64_image = base64.b64encode(image_bytes).decode("utf-8")
-                            
-                            response_content.append({
-                                "type": "image",
-                                "format": "png",
-                                "content": base64_image
-                            })
-                        except Exception as e:
-                            logging.error(f"Error processing image: {e}")
-                            continue
+                        # Get image bytes
+                        image_data = client.files.content(content.image_file.file_id)
+                        image_bytes = image_data.read()
+                        
+                        # Convert to base64
+                        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+                        
+                        response_content.append({
+                            "type": "image",
+                            "format": "png",
+                            "content": base64_image
+                        })
 
         return JSONResponse({"response": response_content})
 
