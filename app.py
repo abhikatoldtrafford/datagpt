@@ -8,8 +8,8 @@ import time
 
 app = FastAPI()
 
-AZURE_ENDPOINT = "https://kb-stellar.openai.azure.com/"  # Root endpoint
-AZURE_API_VERSION = "2024-05-01-preview"  # Required for Assistants API
+AZURE_ENDPOINT = "https://kb-stellar.openai.azure.com/"
+AZURE_API_VERSION = "2024-05-01-preview"
 AZURE_API_KEY = "bc0ba854d3644d7998a5034af62d03ce"
 
 def create_client():
