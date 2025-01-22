@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+openai
+azure-identity
+azure-ai-ml
+azureml-inference-server-http
+python-multipart
