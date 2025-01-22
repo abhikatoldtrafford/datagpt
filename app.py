@@ -30,11 +30,11 @@ def create_client():
 
 async def ensure_initialized():
     """Ensure global context is initialized"""
-    if not global_context["assistant_id"] or not global_context["thread_id"]:
+    if not global_context["assistant_id"]:
         await initiate_chat()
 
 @app.post("/initiate-chat")
-async def initiate_chat(file: UploadFile = File(None)):
+async def initiate_chat():
     """Initialize or reset the chat session"""
     client = create_client()
     
@@ -44,27 +44,19 @@ async def initiate_chat(file: UploadFile = File(None)):
             name="Data Analyst",
             instructions="Analyze data using code interpreter",
             model="gpt-4o-mini",
-            tools=[{"type": "code_interpreter"}],
-            tool_resources={"code_interpreter": {"file_ids": []}}
+            tools=[{"type": "code_interpreter"}]
         )
-        
-        # Create new thread
-        thread = client.beta.threads.create()
 
         # Update global context
         global_context.update({
             "assistant_id": assistant.id,
-            "thread_id": thread.id,
+            "thread_id": None,
             "file_ids": []
         })
 
-        # Handle initial file upload if provided
-        if file:
-            await upload_file(file)
-
         return JSONResponse({
             "message": "Session initialized",
-            "session_id": thread.id
+            "assistant_id": assistant.id
         })
 
     except Exception as e:
@@ -85,23 +77,8 @@ async def upload_file(file: UploadFile = File(...)):
             purpose="assistants"
         )
         
-        # Update assistant with new file ID
-        assistant = client.beta.assistants.retrieve(global_context["assistant_id"])
-        current_files = assistant.tool_resources.code_interpreter.file_ids
-        new_files = current_files + [uploaded_file.id]
-        
-        client.beta.assistants.update(
-            global_context["assistant_id"],
-            tool_resources={
-                "code_interpreter": {
-                    "file_ids": new_files
-                }
-            }
-        )
-        
-        # Update global context
-        global_context["file_ids"] = new_files
-
+        # Store file ID in global context
+        global_context["file_ids"].append(uploaded_file.id)
         return JSONResponse({"message": "File uploaded successfully"})
 
     except Exception as e:
@@ -110,22 +87,33 @@ async def upload_file(file: UploadFile = File(...)):
 
 @app.post("/chat")
 async def chat(prompt: str = Form(...)):
-    """Handle chat interactions with image support"""
+    """Handle chat interactions with file attachments"""
     await ensure_initialized()
     client = create_client()
     
     try:
-        # Add message to thread
-        client.beta.threads.messages.create(
-            thread_id=global_context["thread_id"],
-            role="user",
-            content=prompt,
-            file_ids=global_context["file_ids"]
+        # Create new thread with message and attachments
+        thread = client.beta.threads.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                    "attachments": [
+                        {
+                            "file_id": file_id,
+                            "tools": [{"type": "code_interpreter"}]
+                        } for file_id in global_context["file_ids"]
+                    ]
+                }
+            ]
         )
+
+        # Update thread ID in context
+        global_context["thread_id"] = thread.id
 
         # Create and poll run
         run = client.beta.threads.runs.create(
-            thread_id=global_context["thread_id"],
+            thread_id=thread.id,
             assistant_id=global_context["assistant_id"]
         )
 
@@ -133,16 +121,19 @@ async def chat(prompt: str = Form(...)):
         start = time.time()
         while time.time() - start < 120:
             run = client.beta.threads.runs.retrieve(
-                thread_id=global_context["thread_id"],
+                thread_id=thread.id,
                 run_id=run.id
             )
             if run.status == "completed":
                 break
+            if run.status == "failed":
+                error_msg = run.last_error.message if run.last_error else "Unknown error"
+                raise HTTPException(500, detail=error_msg)
             time.sleep(2)
 
         # Retrieve and format response
         messages = client.beta.threads.messages.list(
-            thread_id=global_context["thread_id"],
+            thread_id=thread.id,
             order="asc"
         )
 
@@ -156,7 +147,6 @@ async def chat(prompt: str = Form(...)):
                             "content": content.text.value
                         })
                     elif content.type == "image_file":
-                        # Download and encode image
                         image_data = client.files.content(content.image_file.file_id)
                         image_bytes = image_data.read()
                         base64_image = base64.b64encode(image_bytes).decode("utf-8")
