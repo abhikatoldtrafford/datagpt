@@ -59,7 +59,7 @@ async def data_analysis(
                 "For numerical data, always show statistical analysis. For images, provide insights. "
                 "When appropriate, create visualizations to support your findings."
             ),
-            model="gpt-4",
+            model="gpt-4o",
             tools=[{"type": "code_interpreter"}],
             tool_resources={"code_interpreter": {"file_ids": file_ids}}
         )
