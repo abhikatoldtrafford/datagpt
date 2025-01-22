@@ -8,8 +8,8 @@ import time
 
 app = FastAPI()
 
-AZURE_ENDPOINT = "https://kb-stellar.openai.azure.com/openai/deployments/prodhub-sales-gpt-4o"
-API_VERSION = "2024-05-13"  # Match the version in your portal
+AZURE_ENDPOINT = "https://kb-stellar.openai.azure.com/openai/deployments/gpt-4o"
+API_VERSION = "2024-11-20"  # Match the version in your portal
 API_KEY = "bc0ba854d3644d7998a5034af62d03ce"
 
 def create_client():
