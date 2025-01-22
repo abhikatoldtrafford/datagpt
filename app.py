@@ -42,8 +42,7 @@ async def data_analysis(
                 file_content = await file.read()
                 uploaded_file = client.files.create(
                     file=file_content,
-                    purpose="assistants",
-                    filename=file.filename
+                    purpose="assistants"
                 )
                 file_ids.append(uploaded_file.id)
                 await file.seek(0)  # Reset file pointer for potential reuse
