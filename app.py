@@ -1,17 +1,25 @@
-import base64
 import logging
+import os
+import time
+import base64
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from openai import AzureOpenAI
-from typing import List, Optional
-import time
+from typing import Optional
 
 app = FastAPI()
 
-AZURE_ENDPOINT = "https://kb-stellar.openai.azure.com/"
-AZURE_API_VERSION = "2024-08-01-preview"
-AZURE_API_KEY = "bc0ba854d3644d7998a5034af62d03ce"
+# Global context storage
+global_context = {
+    "assistant_id": None,
+    "thread_id": None,
+    "vector_store_id": None
+}
 
+# Azure OpenAI configuration
+AZURE_ENDPOINT = "https://kb-stellar.openai.azure.com/"
+AZURE_API_KEY = "bc0ba854d3644d7998a5034af62d03ce"
+AZURE_API_VERSION = "2024-05-01-preview"
 
 def create_client():
     return AzureOpenAI(
@@ -20,84 +28,110 @@ def create_client():
         api_version=AZURE_API_VERSION,
     )
 
-@app.post("/data-analysis")
-async def data_analysis(
-    files: List[UploadFile] = File(...),
-    user_input: str = Form("Analyze the provided data and generate insights"),
-    product_id: Optional[str] = None
-):
-    """
-    Endpoint for data analysis using Azure OpenAI's Code Interpreter.
-    Accepts multiple files and a user query, returns analysis results with images.
-    """
+async def ensure_initialized():
+    """Ensure global context is initialized"""
+    if not all(global_context.values()):
+        await initiate_chat()
+
+@app.post("/initiate-chat")
+async def initiate_chat(file: UploadFile = File(None)):
+    """Initialize or reset the chat session"""
     client = create_client()
-    assistant = None
-    thread = None
-
+    
     try:
-        # 1. Upload files to Azure OpenAI
-        file_ids = []
-        for file in files:
-            try:
-                file_content = await file.read()
-                uploaded_file = client.files.create(
-                    file=file_content,
-                    purpose="assistants"
-                )
-                file_ids.append(uploaded_file.id)
-                await file.seek(0)  # Reset file pointer for potential reuse
-            except Exception as e:
-                logging.error(f"Error uploading {file.filename}: {e}")
-                raise HTTPException(400, f"Failed to upload {file.filename}")
-
-        # 2. Create assistant with code interpreter and files
+        # Create new resources
+        vector_store = client.beta.vector_stores.create(name="main_store")
         assistant = client.beta.assistants.create(
-            name="Data Analyst Assistant",
-            instructions=(
-                "You are a senior data analyst. Use Python (pandas, matplotlib, etc) to analyze files. "
-                "For numerical data, always show statistical analysis. For images, provide insights. "
-                "When appropriate, create visualizations to support your findings."
-            ),
+            name="Data Analyst",
+            instructions="Analyze data using code interpreter and file search",
             model="gpt-4o-mini",
-            tools=[{"type": "code_interpreter"}],
-            tool_resources={"code_interpreter": {"file_ids": file_ids}}
+            tools=[{"type": "code_interpreter"}, {"type": "file_search"}],
+            tool_resources={
+                "file_search": {"vector_store_ids": [vector_store.id]},
+                "code_interpreter": {"file_ids": []}
+            }
         )
-
-        # 3. Create thread and add user message
         thread = client.beta.threads.create()
-        client.beta.threads.messages.create(
-            thread_id=thread.id,
-            role="user",
-            content=user_input
-        )
 
-        # 4. Run analysis
-        run = client.beta.threads.runs.create(
-            thread_id=thread.id,
-            assistant_id=assistant.id,
-            instructions="Provide detailed analysis with visualizations when helpful."
-        )
+        # Update global context
+        global_context.update({
+            "assistant_id": assistant.id,
+            "thread_id": thread.id,
+            "vector_store_id": vector_store.id
+        })
 
-        # 5. Wait for completion
-        start_time = time.time()
-        while True:
-            if time.time() - start_time > 120:  # 2 minute timeout
-                raise HTTPException(504, "Analysis timed out")
+        # Handle initial file upload
+        if file:
+            await upload_file(file)
 
-            run_status = client.beta.threads.runs.retrieve(
-                thread_id=thread.id,
-                run_id=run.id
+        return JSONResponse({
+            "message": "Session initialized",
+            "session_id": thread.id
+        })
+
+    except Exception as e:
+        logging.error(f"Init error: {str(e)}")
+        raise HTTPException(500, "Session initialization failed")
+
+@app.post("/upload-file")
+async def upload_file(file: UploadFile = File(...)):
+    """Handle file uploads for current session"""
+    await ensure_initialized()
+    client = create_client()
+    
+    try:
+        # Save file temporarily
+        file_path = f"/tmp/{file.filename}"
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+
+        # Upload to vector store
+        with open(file_path, "rb") as f:
+            client.beta.vector_stores.file_batches.upload_and_poll(
+                vector_store_id=global_context["vector_store_id"],
+                files=[f]
             )
 
-            if run_status.status == "completed":
+        return JSONResponse({"message": "File uploaded successfully"})
+
+    except Exception as e:
+        logging.error(f"Upload error: {str(e)}")
+        raise HTTPException(500, "File upload failed")
+
+@app.post("/chat")
+async def chat(prompt: str = Form(...)):
+    """Handle chat interactions with image support"""
+    await ensure_initialized()
+    client = create_client()
+    
+    try:
+        # Add message to thread
+        client.beta.threads.messages.create(
+            thread_id=global_context["thread_id"],
+            role="user",
+            content=prompt
+        )
+
+        # Create and poll run
+        run = client.beta.threads.runs.create(
+            thread_id=global_context["thread_id"],
+            assistant_id=global_context["assistant_id"]
+        )
+
+        # Wait for completion
+        start = time.time()
+        while time.time() - start < 120:
+            run = client.beta.threads.runs.retrieve(
+                thread_id=global_context["thread_id"],
+                run_id=run.id
+            )
+            if run.status == "completed":
                 break
-            elif run_status.status in ["failed", "cancelled", "expired"]:
-                raise HTTPException(500, f"Analysis failed: {run_status.last_error}")
             time.sleep(2)
 
-        # 6. Retrieve and format response
+        # Retrieve and format response
         messages = client.beta.threads.messages.list(
-            thread_id=thread.id,
+            thread_id=global_context["thread_id"],
             order="asc"
         )
 
@@ -121,30 +155,19 @@ async def data_analysis(
                             
                             response_content.append({
                                 "type": "image",
-                                "format": "png",  # Azure currently only returns PNG
+                                "format": "png",
                                 "content": base64_image
                             })
                         except Exception as e:
                             logging.error(f"Error processing image: {e}")
                             continue
 
-        return JSONResponse({
-            "analysis": response_content,
-            "assistant_id": assistant.id,
-            "thread_id": thread.id
-        })
+        return JSONResponse({"response": response_content})
 
-    except HTTPException as he:
-        raise he
     except Exception as e:
-        logging.error(f"Analysis error: {str(e)}")
-        raise HTTPException(500, f"Analysis failed: {str(e)}")
-    finally:
-        # Cleanup resources
-        try:
-            if thread:
-                client.beta.threads.delete(thread.id)
-            if assistant:
-                client.beta.assistants.delete(assistant.id)
-        except Exception as e:
-            logging.warning(f"Cleanup error: {str(e)}")
+        logging.error(f"Chat error: {str(e)}")
+        raise HTTPException(500, "Chat processing failed")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
