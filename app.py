@@ -68,8 +68,7 @@ async def data_analysis(
         client.beta.threads.messages.create(
             thread_id=thread.id,
             role="user",
-            content=user_input,
-            file_ids=file_ids
+            content=user_input
         )
 
         # 4. Run analysis
