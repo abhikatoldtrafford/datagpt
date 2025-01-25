@@ -37,8 +37,8 @@ async def ensure_initialized():
 async def initiate_chat():
     """Initialize or reset the chat session"""
     client = create_client()
-    assistant_instructions = 
-"""You are a data analyst specializing in spreadsheet analysis. Follow these rules:
+    assistant_instructions = """
+You are a data analyst specializing in spreadsheet analysis. Follow these rules:
 
 **File Handling:**
 1. If receiving Excel (.xlsx/.xls):
